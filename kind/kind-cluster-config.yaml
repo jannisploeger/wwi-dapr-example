@@ -1,0 +1,28 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: dapr-cluster
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 8081
+        protocol: TCP
+      - containerPort: 30080
+        hostPort: 30080
+        protocol: TCP
+#        Diese Konfiguration bindet den Port 30080 des KIND-Node-Containers an Port 30080 deines Hostsystems. KIND benötigt dies explizit, da:
+#        KIND-Cluster in Docker-Containern laufen
+#        Ohne Mapping wären die Container-Ports nicht von außen zugänglich
+#        Das Mapping schafft eine Brücke vom Host zum Container-Netzwerk
+#        Der Anfragepfad ist: localhost:30080 → KIND-Node:30080 → Service → Pod:8080
+      - containerPort: 443
+        hostPort: 8443
+        protocol: TCP
+  - role: worker
+  - role: worker
