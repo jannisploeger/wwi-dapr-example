@@ -1,3 +1,123 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: zookeeper
+spec:
+  serviceName: "zookeeper"
+  replicas: 1
+  selector:
+    matchLabels:
+      app: zookeeper
+  template:
+    metadata:
+      labels:
+        app: zookeeper
+    spec:
+      containers:
+        - name: zookeeper
+          image: confluentinc/cp-zookeeper:7.5.0
+          ports:
+            - containerPort: 2181
+          env:
+            - name: ZOOKEEPER_CLIENT_PORT
+              value: "2181"
+            - name: ZOOKEEPER_TICK_TIME
+              value: "2000"
+            - name: ZOOKEEPER_SERVER_ID
+              value: "1"
+          resources:
+            limits:
+              cpu: "0.5"
+              memory: "512Mi"
+            requests:
+              cpu: "0.2"
+              memory: "256Mi"
+---
+# Zookeeper-Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: zookeeper
+spec:
+  ports:
+    - port: 2181
+      name: client # Recommended to name ports
+  selector:
+    app: zookeeper
+  # Headless service is often used with StatefulSets
+  clusterIP: None
+---
+# Kafka-StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+spec:
+  serviceName: "kafka" # Must match the Service name
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka
+  template:
+    metadata:
+      labels:
+        app: kafka
+    spec:
+      containers:
+        - name: kafka
+          # Use a specific version tag
+          image: wurstmeister/kafka:2.13-2.8.1
+          ports:
+            - containerPort: 9092
+              name: kafka
+          env:
+            # Use the Zookeeper service name for internal communication
+            - name: KAFKA_ZOOKEEPER_CONNECT
+              value: zookeeper:2181
+            # Use the Kafka service name for advertised listeners
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: PLAINTEXT://kafka.default.svc.cluster.local:9092
+            - name: KAFKA_LISTENERS
+              value: PLAINTEXT://:9092
+            - name: KAFKA_BROKER_ID
+              value: "0" # Static broker ID for a single replica
+            - name: KAFKA_CREATE_TOPICS
+              value: "orders:1:1"
+          resources:
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+            requests:
+              cpu: "0.5"
+              memory: "512Mi"
+          volumeMounts:
+            - name: kafka-storage
+              mountPath: /var/lib/kafka/data # Default data directory for this image
+      # Define volume claim templates for persistent storage
+  volumeClaimTemplates:
+    - metadata:
+        name: kafka-storage
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        resources:
+          requests:
+            storage: 10Gi # Request appropriate storage size
+---
+# Kafka-Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+spec:
+  ports:
+    - port: 9092
+      name: kafka
+  selector:
+    app: kafka
+  # Headless service for StatefulSet
+  clusterIP: None
+---
+# Dapr Pub/Sub Component (Kafka)
 apiVersion: dapr.io/v1alpha1
 kind: Component
 metadata:
@@ -7,10 +127,77 @@ spec:
   version: v1
   metadata:
     - name: brokers # Required. Kafka broker connection setting
+      # Use the Kafka service FQDN
       value:  kafka.default.svc.cluster.local:9092
     - name: authType
       value: "none"
 ---
+# PostgreSQL-StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgresql
+spec:
+  serviceName: "postgresql" # Must match the Service name
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgresql
+  template:
+    metadata:
+      labels:
+        app: postgresql
+    spec:
+      containers:
+        - name: postgresql
+          # Use a specific version tag
+          image: postgres:15
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_PASSWORD
+              value: postgres
+            - name: POSTGRES_DB
+              value: dapr
+          resources:
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+            requests:
+              cpu: "0.5"
+              memory: "512Mi"
+          volumeMounts:
+            - name: postgresql-data
+              mountPath: /var/lib/postgresql/data # Default data directory for this image
+      # Define volume claim templates for persistent storage
+  volumeClaimTemplates:
+    - metadata:
+        name: postgresql-data
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        resources:
+          requests:
+            storage: 5Gi # Request appropriate storage size
+---
+# PostgreSQL-Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgresql
+spec:
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgres
+  selector:
+    app: postgresql
+  # Headless service for StatefulSet
+  clusterIP: None
+---
+# Dapr State Store Component (PostgreSQL)
 apiVersion: dapr.io/v1alpha1
 kind: Component
 metadata:
@@ -20,13 +207,16 @@ spec:
   version: v1
   metadata:
     - name: connectionString
+      # Use the PostgreSQL service FQDN
       value: "host=postgresql.default.svc.cluster.local user=postgres password=postgres port=5432 connect_timeout=10 database=dapr"
 ---
+# Shop-Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: shop-deployment
+  name: shop-deployment # Consistent naming
 spec:
+  replicas: 1
   selector:
     matchLabels:
       app: sweets-shop
@@ -37,19 +227,29 @@ spec:
         app.kubernetes.io/name: sweets-shop
         app.kubernetes.io/part-of: sweets-shop
         app.kubernetes.io/version: 0.0.1
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "shop"
+        dapr.io/app-port: "8080"
     spec:
       containers:
         - name: sweets-shop
-          image: shop:0.0.1-SNAPSHOT
-          imagePullPolicy: Never
+          # Use a specific image tag
+          image: shop:0.0.1-SNAPSHOT # Replace with a proper tag if available
+          # Use IfNotPresent or Always for general deployments
+          imagePullPolicy: IfNotPresent
           livenessProbe:
             httpGet:
               path: /actuator/health
               port: 8080
+            initialDelaySeconds: 10 # Add initial delay for probes
+            periodSeconds: 10
           readinessProbe:
             httpGet:
               path: /actuator/health
               port: 8080
+            initialDelaySeconds: 10 # Add initial delay for probes
+            periodSeconds: 10
           resources:
             limits:
               cpu: "1"
@@ -60,6 +260,7 @@ spec:
           ports:
             - containerPort: 8080
 ---
+# Shop-Service
 apiVersion: v1
 kind: Service
 metadata:
@@ -70,5 +271,107 @@ spec:
   ports:
     - port: 80
       targetPort: 8080
-      nodePort: 30080
+      nodePort: 30080 # Only uncomment if NodePort is truly required
+  # Use ClusterIP or LoadBalancer instead of NodePort for most cases
   type: NodePort
+---
+# Warehouse-Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: warehouse-deployment # Consistent naming
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sweets-warehouse
+  template:
+    metadata:
+      labels:
+        app: sweets-warehouse
+        app.kubernetes.io/name: sweets-warehouse
+        app.kubernetes.io/part-of: sweets-warehouse
+        app.kubernetes.io/version: 0.0.1
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "warehouse"
+        dapr.io/app-port: "8080"
+    spec:
+      containers:
+        - name: sweets-warehouse
+          # Use a specific image tag
+          image: warehouse:0.0.1-SNAPSHOT # Replace with a proper tag if available
+          # Use IfNotPresent or Always for general deployments
+          imagePullPolicy: IfNotPresent
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 10 # Add initial delay for probes
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 10 # Add initial delay for probes
+            periodSeconds: 10
+          resources:
+            limits:
+              cpu: "1"
+              memory: "2Gi"
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+          ports:
+            - containerPort: 8080
+
+---
+# Billing-Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: billing-deployment # Consistent naming
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sweets-billing
+  template:
+    metadata:
+      labels:
+        app: sweets-billing
+        app.kubernetes.io/name: sweets-billing
+        app.kubernetes.io/part-of: sweets-billing
+        app.kubernetes.io/version: 0.0.1
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "billing"
+        dapr.io/app-port: "8080"
+    spec:
+      containers:
+        - name: sweets-billing
+          # Use a specific image tag
+          image: billing:0.0.1-SNAPSHOT # Replace with a proper tag if available
+          # Use IfNotPresent or Always for general deployments
+          imagePullPolicy: IfNotPresent
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 10 # Add initial delay for probes
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 10 # Add initial delay for probes
+            periodSeconds: 10
+          resources:
+            limits:
+              cpu: "1"
+              memory: "2Gi"
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+          ports:
+            - containerPort: 8080

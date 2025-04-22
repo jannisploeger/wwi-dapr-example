@@ -92,7 +92,7 @@
 				<version>${jib-maven-plugin.version}</version>
 				<configuration>
 					<to>
-						<image>shop:${project.version}</image>
+						<image>billing:${project.version}</image>
 					</to>
 				</configuration>
 				<executions>

@@ -87,7 +87,7 @@
 				<version>${jib-maven-plugin.version}</version>
 				<configuration>
 					<to>
-						<image>shop:${project.version}</image>
+						<image>warehouse:${project.version}</image>
 					</to>
 				</configuration>
 				<executions>

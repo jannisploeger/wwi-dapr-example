@@ -19,17 +19,16 @@ jobs:
           distribution: 'temurin'
           cache: maven
 
-      - name: Build Root Project
-        run: mvn -B package --file pom.xml
+      - name: Build and Test All Modules
+        run: mvn -B verify
 
-      - name: Build Warehouse Module
-        run: mvn -B package --file warehouse/pom.xml
-
-      - name: Build Billing Module
-        run: mvn -B package --file billing/pom.xml
-
-      - name: Build All Modules
-        run: mvn -B package
+      - name: Publish Test Results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: always()
+        with:
+          files: |
+            **/target/surefire-reports/*.xml
+            **/target/failsafe-reports/*.xml
 
       # Optional: Dependency Graph Aktualisierung
       - name: Update dependency graph

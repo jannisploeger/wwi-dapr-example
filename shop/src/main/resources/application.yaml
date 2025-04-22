@@ -3,3 +3,11 @@ spring:
     name: shop
 vaadin:
   launch-browser: true
+management:
+  endpoints:
+    web:
+      exposure:
+        include: '*'
+  endpoint:
+    health:
+      show-details: always

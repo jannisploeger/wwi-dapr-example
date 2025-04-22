@@ -11,6 +11,8 @@ $contextName = "kind-$clusterName"
 
 $imageNames = @(
     @{imageName = "shop:0.0.1-SNAPSHOT" }
+    @{imageName = "billing:0.0.1-SNAPSHOT" }
+    @{imageName = "warehouse:0.0.1-SNAPSHOT" }
 )
 
 
@@ -61,17 +63,25 @@ if (Test-Path $configFile)
 
     Write-Host "All Dapr components are running." -ForegroundColor Green
 
-    # Start the Dapr dashboard on port 9999
-    Write-Host "Starting the Dapr dashboard on port 9999." -ForegroundColor Yellow
+
     # Build and load Docker images for all components
 
     # Load the Docker image into the KIND cluster
     foreach ($image in $imageNames) {
         $imageName = $image.imageName
         Write-Host "Loading Docker image '$imageName' into the KIND cluster '$clusterName'." -ForegroundColor Yellow
-        kind load docker-image $imageName --name $clusterName
-        Write-Host "Docker image '$imageName' loaded into the KIND cluster '$clusterName'." -ForegroundColor Green
+
+        $result = kind load docker-image $imageName --name $clusterName 2>&1
+        $success = $LASTEXITCODE -eq 0
+
+        if ($success) {
+            Write-Host "Docker image '$imageName' loaded into the KIND cluster '$clusterName'." -ForegroundColor Green
+        } else {
+            Write-Host "Failed to load Docker image '$imageName'. Error: $result" -ForegroundColor Red
+        }
     }
+    # Start the Dapr dashboard on port 9999
+    Write-Host "Starting the Dapr dashboard on port 9999." -ForegroundColor Yellow
     dapr dashboard -k -p 9999
 }
 else
