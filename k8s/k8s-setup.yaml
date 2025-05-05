@@ -1,3 +1,4 @@
+# Zookeeper-StatefulSet
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -41,10 +42,9 @@ metadata:
 spec:
   ports:
     - port: 2181
-      name: client # Recommended to name ports
+      name: client
   selector:
     app: zookeeper
-  # Headless service is often used with StatefulSets
   clusterIP: None
 ---
 # Kafka-StatefulSet
@@ -53,7 +53,7 @@ kind: StatefulSet
 metadata:
   name: kafka
 spec:
-  serviceName: "kafka" # Must match the Service name
+  serviceName: "kafka"
   replicas: 1
   selector:
     matchLabels:
@@ -63,24 +63,26 @@ spec:
       labels:
         app: kafka
     spec:
+      # init container to wait for Zookeeper
+      initContainers:
+        - name: wait-for-zookeeper
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z -w 2 zookeeper.default.svc.cluster.local 2181; do echo "Waiting for Zookeeper..."; sleep 2; done;']
       containers:
         - name: kafka
-          # Use a specific version tag
           image: wurstmeister/kafka:2.13-2.8.1
           ports:
             - containerPort: 9092
               name: kafka
           env:
-            # Use the Zookeeper service name for internal communication
             - name: KAFKA_ZOOKEEPER_CONNECT
               value: zookeeper:2181
-            # Use the Kafka service name for advertised listeners
             - name: KAFKA_ADVERTISED_LISTENERS
               value: PLAINTEXT://kafka.default.svc.cluster.local:9092
             - name: KAFKA_LISTENERS
               value: PLAINTEXT://:9092
             - name: KAFKA_BROKER_ID
-              value: "0" # Static broker ID for a single replica
+              value: "0"
             - name: KAFKA_CREATE_TOPICS
               value: "orders:1:1"
           resources:
@@ -93,7 +95,6 @@ spec:
           volumeMounts:
             - name: kafka-storage
               mountPath: /var/lib/kafka/data # Default data directory for this image
-      # Define volume claim templates for persistent storage
   volumeClaimTemplates:
     - metadata:
         name: kafka-storage
@@ -101,7 +102,7 @@ spec:
         accessModes: [ "ReadWriteOnce" ]
         resources:
           requests:
-            storage: 10Gi # Request appropriate storage size
+            storage: 256Mi
 ---
 # Kafka-Service
 apiVersion: v1
@@ -114,7 +115,6 @@ spec:
       name: kafka
   selector:
     app: kafka
-  # Headless service for StatefulSet
   clusterIP: None
 ---
 # Dapr Pub/Sub Component (Kafka)
@@ -150,7 +150,6 @@ spec:
     spec:
       containers:
         - name: postgresql
-          # Use a specific version tag
           image: postgres:15
           ports:
             - containerPort: 5432
@@ -162,6 +161,17 @@ spec:
               value: postgres
             - name: POSTGRES_DB
               value: dapr
+          # readiness probe for PostgreSQL
+          readinessProbe:
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: 15
+            periodSeconds: 20
           resources:
             limits:
               cpu: "1"
@@ -180,7 +190,7 @@ spec:
         accessModes: [ "ReadWriteOnce" ]
         resources:
           requests:
-            storage: 5Gi # Request appropriate storage size
+            storage: 256Mi
 ---
 # PostgreSQL-Service
 apiVersion: v1
@@ -190,12 +200,11 @@ metadata:
 spec:
   ports:
     - port: 5432
-      targetPort: 5432
+      targetPort: 5432 # Target port should match container port
       name: postgres
   selector:
     app: postgresql
-  # Headless service for StatefulSet
-  clusterIP: None
+  clusterIP: None # Changed to default ClusterIP
 ---
 # Dapr State Store Component (PostgreSQL)
 apiVersion: dapr.io/v1alpha1
@@ -206,15 +215,72 @@ spec:
   type: state.postgresql
   version: v1
   metadata:
+    # Ensure PostgreSQL is ready before Dapr tries to connect
     - name: connectionString
       # Use the PostgreSQL service FQDN
-      value: "host=postgresql.default.svc.cluster.local user=postgres password=postgres port=5432 connect_timeout=10 database=dapr"
+      value: "host=postgresql.default.svc.cluster.local user=postgres password=postgres port=5432 connect_timeout=10 database=dapr sslmode=disable"
+---
+# Zipkin Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zipkin
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: zipkin
+  template:
+    metadata:
+      labels:
+        app: zipkin
+    spec:
+      containers:
+        - name: zipkin
+          image: openzipkin/zipkin:3.5
+          ports:
+            - containerPort: 9411
+          resources:
+            limits:
+              cpu: "0.5"
+              memory: "512Mi"
+            requests:
+              cpu: "0.2"
+              memory: "256Mi"
+---
+# Zipkin Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: zipkin
+spec:
+  type: ClusterIP
+  ports:
+    - port: 9411
+      targetPort: 9411
+      name: http
+  selector:
+    app: zipkin
+---
+# Dapr Tracing Configuration
+apiVersion: dapr.io/v1alpha1
+kind: Configuration
+metadata:
+  #        Wenn die Anwendungen diese Konfiguration nutzen (über dapr.io/config: "tracing" in ihrer Deployment-Annotation), werden automatisch Traces für Service-zu-Service-Kommunikation erstellt und an Zipkin gesendet.
+  name: tracing
+  namespace: default
+spec:
+  tracing:
+    samplingRate: "1" # Use "1" for 100% sampling, adjust as needed
+    zipkin:
+      # Use the internal Zipkin service name
+      endpointAddress: "http://zipkin.default.svc.cluster.local:9411/api/v2/spans"
 ---
 # Shop-Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: shop-deployment # Consistent naming
+  name: shop-deployment
 spec:
   replicas: 1
   selector:
@@ -231,24 +297,28 @@ spec:
         dapr.io/enabled: "true"
         dapr.io/app-id: "shop"
         dapr.io/app-port: "8080"
+        dapr.io/config: "tracing"
     spec:
+      initContainers:
+        # Waits for PostgreSQL to be connectable before starting the main container
+        - name: wait-for-postgres
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z -w 2 postgresql.default.svc.cluster.local 5432; do echo "Shop waiting for PostgreSQL..."; sleep 2; done; echo "PostgreSQL ready for Shop!"']
       containers:
         - name: sweets-shop
-          # Use a specific image tag
-          image: shop:0.0.1-SNAPSHOT # Replace with a proper tag if available
-          # Use IfNotPresent or Always for general deployments
+          image: shop:0.0.1-SNAPSHOT
           imagePullPolicy: IfNotPresent
           livenessProbe:
             httpGet:
               path: /actuator/health
               port: 8080
-            initialDelaySeconds: 10 # Add initial delay for probes
+            initialDelaySeconds: 20
             periodSeconds: 10
           readinessProbe:
             httpGet:
               path: /actuator/health
               port: 8080
-            initialDelaySeconds: 10 # Add initial delay for probes
+            initialDelaySeconds: 20
             periodSeconds: 10
           resources:
             limits:
@@ -269,17 +339,16 @@ spec:
   selector:
     app: sweets-shop
   ports:
-    - port: 80
-      targetPort: 8080
-      nodePort: 30080 # Only uncomment if NodePort is truly required
-  # Use ClusterIP or LoadBalancer instead of NodePort for most cases
+    - port: 80 # Exposed port
+      targetPort: 8080 # Container port
+      nodePort: 30080 #
   type: NodePort
 ---
 # Warehouse-Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: warehouse-deployment # Consistent naming
+  name: warehouse-deployment
 spec:
   replicas: 1
   selector:
@@ -296,24 +365,28 @@ spec:
         dapr.io/enabled: "true"
         dapr.io/app-id: "warehouse"
         dapr.io/app-port: "8080"
+        dapr.io/config: "tracing"
     spec:
+      initContainers:
+        # Waits for PostgreSQL to be connectable
+        - name: wait-for-postgres
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z -w 2 postgresql.default.svc.cluster.local 5432; do echo "Warehouse waiting for PostgreSQL..."; sleep 2; done; echo "PostgreSQL ready for Warehouse!"']
       containers:
         - name: sweets-warehouse
-          # Use a specific image tag
-          image: warehouse:0.0.1-SNAPSHOT # Replace with a proper tag if available
-          # Use IfNotPresent or Always for general deployments
+          image: warehouse:0.0.1-SNAPSHOT
           imagePullPolicy: IfNotPresent
           livenessProbe:
             httpGet:
               path: /actuator/health
               port: 8080
-            initialDelaySeconds: 10 # Add initial delay for probes
+            initialDelaySeconds: 20
             periodSeconds: 10
           readinessProbe:
             httpGet:
               path: /actuator/health
               port: 8080
-            initialDelaySeconds: 10 # Add initial delay for probes
+            initialDelaySeconds: 20
             periodSeconds: 10
           resources:
             limits:
@@ -330,7 +403,7 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: billing-deployment # Consistent naming
+  name: billing-deployment
 spec:
   replicas: 1
   selector:
@@ -347,24 +420,28 @@ spec:
         dapr.io/enabled: "true"
         dapr.io/app-id: "billing"
         dapr.io/app-port: "8080"
+        dapr.io/config: "tracing"
     spec:
+      initContainers:
+        # Waits for PostgreSQL to be connectable
+        - name: wait-for-postgres
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z -w 2 postgresql.default.svc.cluster.local 5432; do echo "Billing waiting for PostgreSQL..."; sleep 2; done; echo "PostgreSQL ready for Billing!"']
       containers:
         - name: sweets-billing
-          # Use a specific image tag
-          image: billing:0.0.1-SNAPSHOT # Replace with a proper tag if available
-          # Use IfNotPresent or Always for general deployments
+          image: billing:0.0.1-SNAPSHOT
           imagePullPolicy: IfNotPresent
           livenessProbe:
             httpGet:
-              path: /actuator/health
+              path: /actuator/health # Ensure this path exists
               port: 8080
-            initialDelaySeconds: 10 # Add initial delay for probes
+            initialDelaySeconds: 20 # Increased delay after initContainer
             periodSeconds: 10
           readinessProbe:
             httpGet:
-              path: /actuator/health
+              path: /actuator/health # Ensure this path exists
               port: 8080
-            initialDelaySeconds: 10 # Add initial delay for probes
+            initialDelaySeconds: 20 # Increased delay after initContainer
             periodSeconds: 10
           resources:
             limits:
@@ -375,3 +452,17 @@ spec:
               memory: "2Gi"
           ports:
             - containerPort: 8080
+---
+# Zipkin UI Service (NodePort for external access)
+apiVersion: v1
+kind: Service
+metadata:
+  name: zipkin-ui
+spec:
+  selector:
+    app: zipkin
+  ports:
+    - port: 9411 # Internal port
+      targetPort: 9411 # Container port
+      nodePort: 30411 # External port on the node
+  type: NodePort # Exposes the service on each Node's IP at a static port

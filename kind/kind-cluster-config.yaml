@@ -21,6 +21,9 @@ nodes:
 #        Ohne Mapping wären die Container-Ports nicht von außen zugänglich
 #        Das Mapping schafft eine Brücke vom Host zum Container-Netzwerk
 #        Der Anfragepfad ist: localhost:30080 → KIND-Node:30080 → Service → Pod:8080
+      - containerPort: 30411
+        hostPort: 30411
+        protocol: TCP
       - containerPort: 443
         hostPort: 8443
         protocol: TCP

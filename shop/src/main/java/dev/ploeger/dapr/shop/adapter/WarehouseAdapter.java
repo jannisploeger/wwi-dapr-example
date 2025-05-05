@@ -23,5 +23,26 @@ public class WarehouseAdapter {
         return list;
     }
 
+    @SneakyThrows
+    public boolean addToInventory(Sweet sweet) {
+
+        try {
+            // Pass the 'sweet' object directly
+            byte[] response = daprClient.invokeMethod(
+                    "warehouse",           // Target service app-id
+                    "inventory",           // Target method name
+                    sweet,                 // Request body object (NOT byte[])
+                    HttpExtension.POST,         // HTTP Method (POST)
+                    // Optional: Map<String, String> metadata,
+                    byte[].class           // Expected response type
+            ).block();
+
+            return true;
+        } catch (Exception e) {
+            System.err.println("Error adding to inventory: " + e.getMessage());
+            return false;
+        }
+    }
+
 }
 
